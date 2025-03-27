@@ -58,3 +58,31 @@ python demo_x.py
       url={https://arxiv.org/abs/2503.19314}, 
 }
 ```
+
+## Setup
+
+We manage dependencies using `uv` so please install it first then run the following command to install all dependencies.
+
+```bash
+uv sync
+```
+
+FAQ: 
+- You might run into `dgl` dependency install issues and have to build from source on Apple Silicon:
+```bash 
+git clone --recursive https://github.com/dmlc/dgl.git
+cd dgl
+mkdir build
+cd build
+cmake -DUSE_CUDA=OFF \
+  -DUSE_OPENMP=ON \
+  -DOpenMP_C_FLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include" \
+  -DOpenMP_C_LIB_NAMES="omp" \
+  -DOpenMP_CXX_FLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include" \
+  -DOpenMP_CXX_LIB_NAMES="omp" \
+  -DOpenMP_omp_LIBRARY=/opt/homebrew/opt/libomp/lib/libomp.dylib \
+  ..
+make -j4
+cd ../python
+pip install -e .
+```

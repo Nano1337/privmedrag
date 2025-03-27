@@ -2,14 +2,21 @@ from rgl.datasets.ogb import OGBRGLDataset
 from rgl.utils import llm_utils
 from openai import OpenAI
 from rouge_score import rouge_scorer
+from dotenv import load_dotenv
+import os
+
 
 def evaluate_abstracts(generated_abstract, ground_truth_abstract):
     scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
     scores = scorer.score(ground_truth_abstract, generated_abstract)
     return scores
 
-client = OpenAI(api_key="xxxxxxxxxxxxxxx", base_url="https://api.deepseek.com")
-model = "deepseek-chat"
+
+# Load environment variables from .env file
+load_dotenv()
+
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+model = "gpt-4o"
 
 dataset = OGBRGLDataset("ogbn-arxiv")
 titles = dataset.raw_ndata["title"]
