@@ -15,5 +15,4 @@ dependencies = [
     "pybind11>=2.13.6",
     "rouge-score>=0.1.2",
     "scikit-learn>=1.6.1",
-    "torch>=2.6.0",
 ]

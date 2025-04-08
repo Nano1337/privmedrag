@@ -615,7 +615,7 @@ int main() {
 }
 
 // Expose the function using pybind11
-PYBIND11_MODULE(libretrieval, m) {
+PYBIND11_MODULE(retrieval, m) {
     m.def("retrieve", &retrieve, "Retrieve subgraph using shortest paths");
     m.def("batch_retrieve", &batch_retrieve, "Retrieve subgraph for a batch of seed vectors using shortest paths");
     m.def("steiner_batch_retrieve", &steiner_batch_retrieve, "Retrieve subgraph for a batch of seed vectors using a heuristic Steiner tree algorithm");

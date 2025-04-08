@@ -2,13 +2,13 @@ import torch
 import numpy as np
 import dgl
 from pcst_fast import pcst_fast
-from rgl.graph_retrieval import libretrieval
+from rgl.graph_retrieval import retrieval
 
 # C++ pybind
-retrieve = libretrieval.retrieve
-batch_retrieve = libretrieval.batch_retrieve
-steiner_batch_retrieve = libretrieval.steiner_batch_retrieve
-dense_batch_retrieve = libretrieval.dense_batch_retrieve
+retrieve = retrieval.retrieve
+batch_retrieve = retrieval.batch_retrieve
+steiner_batch_retrieve = retrieval.steiner_batch_retrieve
+dense_batch_retrieve = retrieval.dense_batch_retrieve
 
 # # C
 # import numpy as np

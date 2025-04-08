@@ -886,7 +886,6 @@ dependencies = [
     { name = "pybind11" },
     { name = "rouge-score" },
     { name = "scikit-learn" },
-    { name = "torch" },
 ]
 
 [package.metadata]
@@ -901,7 +900,6 @@ requires-dist = [
     { name = "pybind11", specifier = ">=2.13.6" },
     { name = "rouge-score", specifier = ">=0.1.2" },
     { name = "scikit-learn", specifier = ">=1.6.1" },
-    { name = "torch", specifier = ">=2.6.0" },
 ]
 
 [[package]]

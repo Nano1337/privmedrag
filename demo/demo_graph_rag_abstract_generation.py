@@ -9,6 +9,10 @@ from rgl.utils import llm_utils
 from openai import OpenAI
 import os
 from rouge_score import rouge_scorer
+from dotenv import load_dotenv
+# Load environment variables from .env file
+load_dotenv()
+
 
 def evaluate_abstracts(generated_abstract, ground_truth_abstract):
     scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
@@ -16,8 +20,8 @@ def evaluate_abstracts(generated_abstract, ground_truth_abstract):
     return scores
 
 
-client = OpenAI(api_key="xxxxxxxxxxxxxxx", base_url="https://api.deepseek.com")
-model = "deepseek-chat"
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+model = "gpt-4o"
 
 dataset = OGBRGLDataset("ogbn-arxiv", "../dataset/ogbn-arxiv")
 titles = dataset.raw_ndata["title"]
@@ -25,7 +29,7 @@ abstracts = dataset.raw_ndata["abstract"]
 src = dataset.graph.edges()[0].numpy().tolist()
 dst = dataset.graph.edges()[1].numpy().tolist()
 
-query_node_indices = [0, 1]
+query_node_indices = [0]
 query_vectors = dataset.feat[query_node_indices]  # TODO multi query node; query text
 engine = VectorSearchEngine(dataset.feat)
 batch_seeds, _ = engine.search(query_vectors, k=2)
