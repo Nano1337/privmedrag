@@ -86,3 +86,16 @@ make -j4
 cd ../python
 pip install -e .
 ```
+
+
+## Data
+
+To prepare to the data: 
+
+```bash
+wget -O dataset/synthea-dataset-100.zip https://github.com/lhs-open/synthetic-data/raw/main/record/synthea-dataset-100.zip
+```
+
+```bash
+unzip dataset/synthea-dataset-100.zip -d dataset/synthea-dataset-100
+```
