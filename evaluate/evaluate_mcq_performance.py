@@ -77,7 +77,7 @@ def format_patient_data(patient_data: Dict) -> str:
     if not patient_data or not isinstance(patient_data, dict):
         return "No patient data available."
     
-    # Basic demographic information
+    # Basic demographic information - simplify formatting
     patient_info = [
         "PATIENT ELECTRONIC HEALTH RECORD (EHR):",
         f"Patient ID: {patient_data.get('patient_id', 'Unknown')}",
@@ -181,6 +181,12 @@ def main():
         help="OpenAI model to use for evaluation (or 'gemini' for Gemini API)"
     )
     parser.add_argument(
+        "--gemini_model",
+        type=str,
+        default="gemini-2.0-flash",
+        help="Specific Gemini model to use when --model is 'gemini' or --use_gemini is set"
+    )
+    parser.add_argument(
         "--num_questions",
         type=int,
         default=10,
@@ -220,10 +226,14 @@ def main():
         
         # Limit number of questions if specified
         if args.num_questions > 0 and args.num_questions < len(mcqs):
-            # Get a random sample for evaluation
-            indices = random.sample(range(len(mcqs)), args.num_questions)
+            # Get a deterministic sample for evaluation based on seed
+            # This ensures the same questions are selected each time with the same seed
+            indices = list(range(len(mcqs)))
+            random.shuffle(indices)  # Shuffle is deterministic with the set seed
+            indices = indices[:args.num_questions]  # Take the first n questions after shuffling
+            indices.sort()  # Sort to ensure consistent processing order
             mcqs = [mcqs[i] for i in indices]
-            print(f"Selected {len(mcqs)} random MCQs for evaluation")
+            print(f"Selected {len(mcqs)} deterministic MCQs for evaluation with seed {args.seed}")
     except Exception as e:
         print(f"Error loading MCQs from Hugging Face: {e}")
         return 1
@@ -255,8 +265,8 @@ def main():
             print("Please add it to your .env file or set it in your environment")
             return 1
         else:
-            print("Using Gemini API for evaluation")
-            args.model = "gemini-2.0-flash"  # Set the model name for reporting
+            print(f"Using Gemini API for evaluation with model: {args.gemini_model}")
+            args.model = args.gemini_model  # Set the model name for reporting
     
     for i, mcq in enumerate(mcqs):
         print(f"\nProcessing question {i+1}/{len(mcqs)} - Type: {mcq['question_type']}")
@@ -457,7 +467,7 @@ def main():
     
     return 0
 
-def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_neighbors=15, n_hops=2):
+def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_neighbors=20, n_hops=1):
     """
     Retrieve relevant medical knowledge from PrimeKG by traversing the graph
     starting from entities that match the query terms
@@ -595,17 +605,41 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
     
     # Sort matches (exact matches first, then by match type)
     matched_nodes.sort(key=lambda x: (0 if x[2] == 'exact' else 
-                                    1 if x[2] == 'word_overlap' else 
-                                    2 if x[2] == 'substring' else 3))
+                                     1 if x[2] == 'word_overlap' else 
+                                     2 if x[2] == 'substring' else 3))
     
     # Take top 3 matches as starting points
     start_nodes = matched_nodes[:3]
     
-    # Define important medical relationship types to prioritize
+    # Define important medical relationship types to prioritize with weights
     PRIORITY_RELATIONS = {
-        'drug': ['indication', 'contraindication', 'off-label use', 'drug_effect', 'drug_protein'],
-        'disease': ['indication', 'contraindication', 'off-label use', 'disease_disease', 'disease_protein'],
-        'gene': ['disease_protein', 'drug_protein', 'protein_protein']
+        'drug': {
+            'indication': 1.5, 
+            'contraindication': 1.3, 
+            'off-label use': 1.2, 
+            'drug_effect': 1.4, 
+            'drug_protein': 1.0,
+            'treats': 1.8
+        },
+        'disease': {
+            'indication': 1.5, 
+            'contraindication': 1.3, 
+            'symptom': 1.6,
+            'risk_factor': 1.5,
+            'disease_disease': 1.4, 
+            'disease_protein': 1.0,
+            'has_symptom': 1.7
+        },
+        'symptom': {
+            'symptom_of': 1.8,
+            'co_occurs_with': 1.4,
+            'diagnoses': 1.7
+        },
+        'gene': {
+            'disease_protein': 1.0, 
+            'drug_protein': 1.0, 
+            'protein_protein': 0.8
+        }
     }
     
     all_neighbors = set()
@@ -615,9 +649,10 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
     for node_idx, node_name, _ in start_nodes:
         # Get node category
         node_category = categories[node_idx].split('/')[0] if '/' in categories[node_idx] else categories[node_idx]
+        node_category_lower = node_category.lower()
         
         # Get priority relationships for this node type
-        priority_rels = PRIORITY_RELATIONS.get(node_category.lower(), [])
+        priority_rels = PRIORITY_RELATIONS.get(node_category_lower, {})
         
         # Collect relations using DGL's efficient neighbor sampling
         collected_relations = {node_idx: []}
@@ -627,10 +662,9 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
         if isinstance(out_edges, tuple) and len(out_edges) == 2:
             src_nodes, dst_nodes = out_edges
             
-            # Limit to max_neighbors
-            max_out = min(len(dst_nodes), max_neighbors // 2)
-            
-            for i in range(max_out):
+            # Process all destination nodes and score them
+            relation_scores = []
+            for i in range(len(dst_nodes)):
                 try:
                     dst = dst_nodes[i].item() if hasattr(dst_nodes[i], 'item') else int(dst_nodes[i])
                     # Find the relation type
@@ -639,20 +673,45 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
                     # Get relation type from edge data
                     if hasattr(edge_id, 'numel') and edge_id.numel() > 0:
                         rel_type = graph.edata['relation_type'][edge_id].item() if hasattr(edge_id, 'item') else str(edge_id)
-                        collected_relations[node_idx].append((rel_type, dst, '->'))
-                        all_neighbors.add(dst)
+                        
+                        # Calculate priority score based on relation type
+                        rel_type_str = str(rel_type)
+                        # Check if this is a priority relation for this node type
+                        score = 0.5  # Base score for all relations
+                        
+                        # Boost score if it's a priority relation
+                        for priority_key, weight in priority_rels.items():
+                            if priority_key in rel_type_str.lower():
+                                score = weight
+                                break
+                        
+                        # Add target node category bonus
+                        dst_category = categories[dst].split('/')[0].lower() if '/' in categories[dst] else categories[dst].lower()
+                        # Boost specific category connections
+                        if dst_category in ['disease', 'symptom', 'drug', 'clinical_finding']:
+                            score += 0.3
+                        
+                        relation_scores.append((rel_type, dst, '->', score))
                 except Exception as e:
                     continue
+            
+            # Sort by score and take top max_neighbors/2
+            relation_scores.sort(key=lambda x: x[3], reverse=True)
+            top_relations = relation_scores[:max_neighbors // 2]
+            
+            # Add top relations to collected_relations
+            for rel_type, dst, direction, _ in top_relations:
+                collected_relations[node_idx].append((rel_type, dst, direction))
+                all_neighbors.add(dst)
         
         # Get incoming edges
         in_edges = graph.in_edges(node_idx)
         if isinstance(in_edges, tuple) and len(in_edges) == 2:
             src_nodes, dst_nodes = in_edges
             
-            # Limit to max_neighbors
-            max_in = min(len(src_nodes), max_neighbors // 2)
-            
-            for i in range(max_in):
+            # Process all source nodes and score them
+            relation_scores = []
+            for i in range(len(src_nodes)):
                 try:
                     src = src_nodes[i].item() if hasattr(src_nodes[i], 'item') else int(src_nodes[i])
                     # Find the relation type
@@ -661,18 +720,44 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
                     # Get relation type from edge data
                     if hasattr(edge_id, 'numel') and edge_id.numel() > 0:
                         rel_type = graph.edata['relation_type'][edge_id].item() if hasattr(edge_id, 'item') else str(edge_id)
-                        collected_relations[node_idx].append((rel_type, src, '<-'))
-                        all_neighbors.add(src)
+                        
+                        # Calculate priority score based on relation type
+                        rel_type_str = str(rel_type)
+                        # Check if this is a priority relation for this node type
+                        score = 0.5  # Base score for all relations
+                        
+                        # Boost score if it's a priority relation
+                        for priority_key, weight in priority_rels.items():
+                            if priority_key in rel_type_str.lower():
+                                score = weight
+                                break
+                        
+                        # Add source node category bonus
+                        src_category = categories[src].split('/')[0].lower() if '/' in categories[src] else categories[src].lower()
+                        # Boost specific category connections
+                        if src_category in ['disease', 'symptom', 'drug', 'clinical_finding']:
+                            score += 0.3
+                        
+                        relation_scores.append((rel_type, src, '<-', score))
                 except Exception as e:
                     continue
+            
+            # Sort by score and take top max_neighbors/2
+            relation_scores.sort(key=lambda x: x[3], reverse=True)
+            top_relations = relation_scores[:max_neighbors // 2]
+            
+            # Add top relations to collected_relations
+            for rel_type, src, direction, _ in top_relations:
+                collected_relations[node_idx].append((rel_type, src, direction))
+                all_neighbors.add(src)
         
         edge_info.update(collected_relations)
     
     # Format the retrieved knowledge - group by category for better organization
-    knowledge_context = ["KNOWLEDGE GRAPH CONTEXT:"]
+    knowledge_context = ["KNOWLEDGE GRAPH INFORMATION:"]
     
     # Add starting point entities
-    knowledge_context.append("\nQUERY ENTITIES:")
+    knowledge_context.append("\n* RELEVANT ENTITIES:")
     for node_idx, node_name, match_type in start_nodes:
         node_category = categories[node_idx]
         node_desc = descriptions[node_idx]
@@ -689,16 +774,18 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
             entities_by_category[main_cat] = []
         entities_by_category[main_cat].append(node)
     
-    # Add related entities by category
+    # Only include the most clinically relevant entity categories
+    relevant_categories = ['disease', 'symptom', 'drug', 'clinical_finding', 'procedure']
     for category, nodes in entities_by_category.items():
-        knowledge_context.append(f"\n{category.upper()} ENTITIES:")
-        for node in nodes[:5]:  # Limit to 5 entities per category
-            node_name = names[node]
-            node_desc = descriptions[node]
-            knowledge_context.append(f"- {node_name}: {node_desc}")
+        if category.lower() in relevant_categories:
+            knowledge_context.append(f"\n{category.upper()} ENTITIES:")
+            for node in nodes[:5]:  # Limit to 5 entities per category
+                node_name = names[node]
+                node_desc = descriptions[node]
+                knowledge_context.append(f"- {node_name}: {node_desc}")
     
     # Add relationships
-    knowledge_context.append("\nRELATIONSHIPS:")
+    knowledge_context.append("\n* KEY RELATIONSHIPS:")
     for node_idx, node_name, _ in start_nodes:
         if node_idx in edge_info:
             knowledge_context.append(f"\nRelationships for {node_name}:")
@@ -714,13 +801,14 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
     return "\n".join(knowledge_context)
 
 
-def chat_with_gemini(prompt, sys_prompt=None):
+def chat_with_gemini(prompt, sys_prompt=None, model_name="gemini-2.0-flash"):
     """
     Call the Gemini API with the given prompt using the updated API format
     
     Args:
         prompt: The prompt to send to Gemini
         sys_prompt: System prompt (used in the prompt for Gemini)
+        model_name: The specific Gemini model to use
         
     Returns:
         The response from Gemini
@@ -752,7 +840,7 @@ def chat_with_gemini(prompt, sys_prompt=None):
     # Call Gemini API and collect the response
     try:
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=model_name,
             contents=contents,
             config=generate_content_config,
         )
@@ -859,19 +947,18 @@ def evaluate_mcq(mcq, patient_data, primekg_dataset, model, use_rag=False, max_r
         # Get knowledge graph context
         kg_context = get_graph_traversal_context(medical_terms, primekg_dataset)
     
-    # Format the prompt for the LLM
+    # Format the prompt for the LLM - keeping it simple and focused
     prompt = f"""You are a medical expert taking a multiple-choice medical exam. Answer the following question based on your medical knowledge.
 
 {patient_context}
-
 """
     
     # Add knowledge graph context if using RAG
     if use_rag and kg_context:
-        prompt += f"\n{kg_context}\n\n"
+        prompt += f"\n{kg_context}\n"
     
     # Add the question and options
-    prompt += f"QUESTION: {question}\n\nOPTIONS:\n"
+    prompt += f"\nQUESTION: {question}\n\nOPTIONS:\n"
     
     # Add options with letter labels - IMPORTANT: correct_index is NOT used here
     option_labels = ['a', 'b', 'c', 'd']
@@ -880,8 +967,8 @@ def evaluate_mcq(mcq, patient_data, primekg_dataset, model, use_rag=False, max_r
         if i < len(options) and i < len(option_labels):
             prompt += f"{option_labels[i]}. {option}\n"
     
-    # Add instructions for the response format
-    prompt += "\nPlease select the most appropriate answer from the options above. Provide your answer as a JSON object with the following format: {\"answer\": \"a\"} where the letter corresponds to your selected option."
+    # Keep instructions concise and direct
+    prompt += "\nSelect the most appropriate answer from the options above. Provide your answer as a JSON object with the following format: {\"answer\": \"a\"} where the letter corresponds to your selected option."
     
     # Call the LLM with retry logic
     for attempt in range(max_retries):
@@ -892,7 +979,9 @@ def evaluate_mcq(mcq, patient_data, primekg_dataset, model, use_rag=False, max_r
             if use_gemini or model.lower() == "gemini":
                 # Use Gemini API
                 try:
-                    response = chat_with_gemini(prompt, sys_prompt=sys_msg)
+                    # Pass the specific Gemini model name from args
+                    model_name = model if model.startswith("gemini") else "gemini-2.0-flash"
+                    response = chat_with_gemini(prompt, sys_prompt=sys_msg, model_name=model_name)
                 except Exception as e:
                     print(f"Error with Gemini API: {e}")
                     raise e

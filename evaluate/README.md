@@ -41,7 +41,7 @@ python upload_to_hf.py
 ### 2. Evaluate Model Performance (TODO)
 
 ```bash
-./evaluate_mcq_performance.py --mcq_file ./output/medical_mcqs.json --output_file ./output/evaluation_results.json --llm_model gpt-4 --rag_model gpt-4-with-rag
+python evaluate/evaluate_mcq_performance.py --model gemini --gemini_model gemini-2.0-flash --output_file ./evaluate/output/evaluation_results_test.json --seed 42 --num_questions 400
 ```
 
 ## Implementation Details
