@@ -55,14 +55,7 @@ wget -O dataset/synthea-dataset-100.zip https://github.com/lhs-open/synthetic-da
 unzip dataset/synthea-dataset-100.zip -d dataset/synthea-dataset-100
 ```
 
-To generate the synthetic data, please run: 
-```bash
-TODO (haoli): add bash command here to make unified parquet
-```
-
-## Evaluation
-
-To run evaluation, please read [./evaluate/README.md](./evaluate/README.md).
+To generate the synthetic data and run evaluations, please see: [./evaluate/README.md](./evaluate/README.md).
 
 ## Acknowledgements
 
