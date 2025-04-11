@@ -12,9 +12,14 @@ import random
 import pandas as pd
 import numpy as np
 import time
+import random
+import re
 from datasets import load_dataset
 from dotenv import load_dotenv
 from typing import Dict, List, Any, Tuple, Set, Optional
+from difflib import get_close_matches
+import medspacy
+import spacy
 
 # Import OpenAI for LLM calls
 import openai
@@ -467,7 +472,93 @@ def main():
     
     return 0
 
-def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_neighbors=15, n_hops=1, question_type=None):
+def extract_base_medication_name(medication_string):
+    """
+    Extract the base drug name from a medication string that includes dosage and form
+    
+    Args:
+        medication_string: String like 'lisinopril 10 MG Oral Tablet'
+        
+    Returns:
+        Base drug name (e.g., 'lisinopril')
+    """
+    # Common patterns in medication strings
+    # 1. Extract content before dosage
+    dosage_pattern = re.compile(r'(.+?)\s+\d+\s*(?:MG|MCG|ML|G)', re.IGNORECASE)
+    match = dosage_pattern.search(medication_string)
+    if match:
+        return match.group(1).strip()
+    
+    # 2. Handle brand name with generic in brackets like "Tegretol [Carbamazepine]"
+    bracket_pattern = re.compile(r'\[(.+?)\]', re.IGNORECASE)
+    match = bracket_pattern.search(medication_string)
+    if match:
+        return match.group(1).strip()
+    
+    # 3. Handle generic name with brand in brackets like "Carbamazepine [Tegretol]"
+    bracket_pattern = re.compile(r'(.+?)\s*\[', re.IGNORECASE)
+    match = bracket_pattern.search(medication_string)
+    if match:
+        return match.group(1).strip()
+    
+    # 4. Just take the first word for simplicity if nothing else matched
+    words = medication_string.split()
+    if words:
+        # Handle mixed case like amLODIPine -> amlodipine
+        word = words[0]
+        if any(c.isupper() for c in word[1:]):
+            return word.lower()
+        return word
+    
+    # If all else fails, return the original string
+    return medication_string
+
+
+def extract_medical_entities(text):
+    """
+    Use medspacy to extract medical entities from text
+    
+    Args:
+        text: Text to extract entities from
+        
+    Returns:
+        List of extracted medical entity texts
+    """
+    try:
+        # Load the medspacy model
+        nlp = medspacy.load()
+        
+        # Process the text
+        doc = nlp(text)
+        
+        # Extract entities
+        entities = []
+        for ent in doc.ents:
+            # Only keep relevant clinical entities
+            if ent.label_ in ["PROBLEM", "TREATMENT", "TEST", "MEDICATION", "PROCEDURE"]:
+                entities.append(ent.text)
+        
+        # Add any CYP enzymes which might not be captured
+        for token in doc:
+            if "CYP" in token.text and token.text not in entities:
+                entities.append(token.text)
+        
+        return entities
+    except Exception as e:
+        print(f"Error in entity extraction: {e}")
+        # Fallback to simple extraction
+        words = text.split()
+        entities = []
+        i = 0
+        while i < len(words):
+            # Look for capitalized words or medical abbreviations
+            if (words[i][0].isupper() and len(words[i]) > 2) or "CYP" in words[i]:
+                entities.append(words[i])
+            i += 1
+        return entities
+
+
+def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_neighbors=10, n_hops=2, question_type=None):
     """
     Retrieve relevant medical knowledge from PrimeKG by traversing the graph
     starting from entities that match the query terms
@@ -475,8 +566,8 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
     Args:
         query_terms: List of medical terms to search for in the graph
         primekg_dataset: Loaded PrimeKG dataset
-        max_neighbors: Maximum number of neighbors to retrieve
-        n_hops: Number of hops for graph traversal
+        max_neighbors: Maximum number of neighbors to retrieve per node
+        n_hops: Number of hops for graph traversal (default: 3)
         
     Returns:
         String containing relevant medical knowledge from the graph
@@ -514,87 +605,115 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
     if not filtered_terms:
         return "No healthcare-related entities found for KG search."
     
-    # Find matching entities using multiple strategies
     print("Searching for matching entities in PrimeKG...")
     
-    # Get relevant medical categories
-    medical_categories = ['drug', 'disease', 'symptom', 'chemical', 'gene', 'protein', 'anatomy']
-    
-    # Track matched nodes and their mapping to query terms
+    # Track matched nodes
     matched_nodes = []
-    query_entity_map = {query: [] for query in filtered_terms}
-    found_node_indices = set()
     
-    # For each query term, try to find matches in the knowledge graph
+    # Keep track of matches we've already found to avoid duplication
+    matched_entity_names = set()
+    
+    # Find matches for each medical term in the knowledge graph
     for query_term in filtered_terms:
         clean_query = query_term.lower().strip()
-        found_match = False
-        
-        # 1. Try exact name match first (highest priority)
-        exact_matches = []
-        for i, name in enumerate(names):
-            if name.lower() == clean_query:
-                exact_matches.append(i)
-        
-        if exact_matches:
-            idx = exact_matches[0]  # Take the first exact match
-            matched_nodes.append((idx, names[idx], 'exact'))
-            query_entity_map[query_term].append(idx)
-            found_node_indices.add(idx)
-            print(f"KG Exact Match: '{query_term}' -> '{names[idx]}'")
-            found_match = True
+        if len(clean_query) < 3:  # Skip very short terms
             continue
+            
+        # Skip if we've already matched this term (case-insensitive)
+        if clean_query in matched_entity_names:
+            continue
+            
+        # Try to extract base medication name for better matching
+        base_medication = extract_base_medication_name(query_term).lower()
+        base_medication_length = len(base_medication)
         
-        # 2. Try medical term matching with category filtering
-        category_matches = []
+        # For fuzzy matching, collect all node names for efficient search
+        found_match = False
+        all_names_lower = [str(name).lower() for name in names if name]
         
-        # First, identify potential matches by significant word overlap
-        query_words = set(clean_query.split())
-        if len(query_words) >= 1:
-            for i, name in enumerate(names):
-                # Skip if node category doesn't match medical categories
-                node_category = categories[i].lower()
-                if not any(cat in node_category for cat in medical_categories):
-                    continue
-                    
-                name_lower = name.lower()
-                name_words = set(name_lower.split())
-                
-                # Calculate word overlap for multi-word terms
-                if len(query_words) > 1 and len(name_words) > 1:
+        # 1. Try exact match first (highest priority)
+        for i, name_lower in enumerate(all_names_lower):
+            if name_lower == clean_query:
+                matched_nodes.append((i, 1.0, 'exact'))
+                found_match = True
+                matched_entity_names.add(clean_query)
+                print(f"KG Exact Match: '{query_term}' -> '{names[i]}'")
+                break
+        
+        if found_match:
+            continue
+            
+        # 2. Try exact match with extracted base medication name
+        if base_medication_length >= 4 and base_medication != clean_query:
+            for i, name_lower in enumerate(all_names_lower):
+                if name_lower == base_medication:
+                    matched_nodes.append((i, 0.95, 'base_med_exact'))
+                    found_match = True
+                    matched_entity_names.add(base_medication)
+                    print(f"KG Base Medication Match: '{query_term}' -> '{names[i]}'")
+                    break
+        
+        if found_match:
+            continue
+            
+        # 3. Try fuzzy matching with difflib for medications
+        if base_medication_length >= 4:
+            close_matches = get_close_matches(base_medication, all_names_lower, n=1, cutoff=0.8)
+            if close_matches:
+                best_match = close_matches[0]
+                match_idx = all_names_lower.index(best_match)
+                similarity = 1.0 - (1 - 0.8)  # Convert cutoff to similarity score
+                matched_nodes.append((match_idx, similarity, 'fuzzy'))
+                found_match = True
+                matched_entity_names.add(base_medication)
+                print(f"KG Fuzzy Match: '{query_term}' -> '{names[match_idx]}' (Score: {similarity:.2f})")
+                continue
+        
+        # 4. Word overlap (for multi-word terms)
+        if len(clean_query.split()) > 1:
+            best_overlap = None
+            best_score = 0.4  # Minimum threshold
+            best_idx = -1
+            
+            query_words = set(clean_query.split())
+            for i, name_lower in enumerate(all_names_lower):
+                if len(name_lower.split()) > 1:
+                    name_words = set(name_lower.split())
                     common_words = query_words.intersection(name_words)
-                    if common_words:
-                        # Calculate Jaccard similarity
-                        similarity = len(common_words) / len(query_words.union(name_words))
-                        if similarity > 0.3:  # Reasonable threshold
-                            category_matches.append((i, similarity, 'word_overlap'))
-                
-                # For single words or when word overlap fails, try more specific matching
-                elif len(query_words) <= 2 or len(name_words) <= 2:
-                    # Check for significant substring match
-                    if len(clean_query) > 3 and len(name_lower) > 3:
-                        if clean_query in name_lower:
-                            # Prefer matches where query is a larger portion of the name
-                            similarity = len(clean_query) / len(name_lower)
-                            if similarity > 0.5:  # Significant portion
-                                category_matches.append((i, similarity, 'substring'))
-                        # Also check if any significant word in the query matches
-                        elif any(word in name_lower for word in query_words if len(word) > 3):
-                            # Less confident match
-                            similarity = 0.4
-                            category_matches.append((i, similarity, 'keyword'))
+                    if common_words and len(common_words) >= len(query_words) * 0.5:
+                        # At least half of query words found in name
+                        similarity = len(common_words) / max(len(query_words), len(name_words))
+                        if similarity > best_score:
+                            best_score = similarity
+                            best_overlap = name_lower
+                            best_idx = i
+            
+            if best_overlap:
+                matched_nodes.append((best_idx, best_score, 'overlap'))
+                found_match = True
+                matched_entity_names.add(clean_query)
+                print(f"KG Overlap Match: '{query_term}' -> '{names[best_idx]}' (Score: {best_score:.2f})")
+                continue
         
-        # Sort matches by similarity score
-        category_matches.sort(key=lambda x: x[1], reverse=True)
-        
-        if category_matches:
-            # Take the best match
-            idx, score, match_type = category_matches[0]
-            matched_nodes.append((idx, names[idx], match_type))
-            query_entity_map[query_term].append(idx)
-            found_node_indices.add(idx)
-            print(f"KG {match_type.title()} Match: '{query_term}' -> '{names[idx]}' (Score: {score:.2f})")
-            found_match = True
+        # 5. Substring match (as a last resort)
+        if not found_match and len(clean_query) > 3:
+            best_substring = None
+            best_score = 0.6  # Minimum threshold
+            best_idx = -1
+            
+            for i, name_lower in enumerate(all_names_lower):
+                if clean_query in name_lower:
+                    similarity = len(clean_query) / len(name_lower)
+                    if similarity > best_score:
+                        best_score = similarity
+                        best_substring = name_lower
+                        best_idx = i
+            
+            if best_substring:
+                matched_nodes.append((best_idx, best_score, 'substring'))
+                found_match = True
+                matched_entity_names.add(clean_query)
+                print(f"KG Substring Match: '{query_term}' -> '{names[best_idx]}' (Score: {best_score:.2f})")
         
         if not found_match:
             print(f"KG No Match: '{query_term}' not found in PrimeKG node names.")
@@ -603,239 +722,242 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
     if not matched_nodes:
         return "No relevant entities found in knowledge graph."
     
-    # Sort matches (exact matches first, then by match type)
-    matched_nodes.sort(key=lambda x: (0 if x[2] == 'exact' else 
-                                     1 if x[2] == 'word_overlap' else 
-                                     2 if x[2] == 'substring' else 3))
+    # Sort matches by score (higher score first)
+    matched_nodes.sort(key=lambda x: x[1], reverse=True)
     
-    # Adjust number of starting points based on question type
-    if question_type == 'RISK_ASSESSMENT':
-        # For risk assessment, we want more focused starting points
-        start_nodes = matched_nodes[:1] if matched_nodes else []
-    else:
-        # For other types, use 2 starting points
-        start_nodes = matched_nodes[:2] if matched_nodes else []
+    # Take only the top 2 matches as seed nodes for a more focused search
+    seed_nodes = [node_idx for node_idx, _, _ in matched_nodes[:2]]
+    print(f"Selected {len(seed_nodes)} seed nodes for traversal")
     
-    # Define important medical relationship types to prioritize with weights
-    PRIORITY_RELATIONS = {
-        'drug': {
-            'indication': 1.5, 
-            'contraindication': 1.3, 
-            'off-label use': 1.2, 
-            'drug_effect': 1.4, 
-            'drug_protein': 1.0,
-            'treats': 1.8
-        },
-        'disease': {
-            'indication': 1.5, 
-            'contraindication': 1.3, 
-            'symptom': 1.6,
-            'risk_factor': 1.5,
-            'disease_disease': 1.4, 
-            'disease_protein': 1.0,
-            'has_symptom': 1.7
-        },
-        'symptom': {
-            'symptom_of': 1.8,
-            'co_occurs_with': 1.4,
-            'diagnoses': 1.7
-        },
-        'gene': {
-            'disease_protein': 1.0, 
-            'drug_protein': 1.0, 
-            'protein_protein': 0.8
-        }
-    }
+    # Set a hard cap on total nodes to avoid explosion
+    MAX_TOTAL_NODES = 75
     
-    # Adjust priorities based on question type
-    if question_type == 'RISK_ASSESSMENT':
-        # For risk assessment, prioritize statistical and predictive relationships
-        PRIORITY_RELATIONS['disease']['risk_factor'] = 2.0
-        PRIORITY_RELATIONS['disease']['associated_with'] = 1.9
-        PRIORITY_RELATIONS['disease']['complication'] = 1.9
-        PRIORITY_RELATIONS['disease']['predisposes'] = 2.0
-        PRIORITY_RELATIONS['disease']['probability'] = 2.0
-        # Deprioritize treatment-related info for risk questions
-        PRIORITY_RELATIONS['drug']['treats'] = 0.8
-        PRIORITY_RELATIONS['drug']['indication'] = 0.7
-    elif question_type == 'MECHANISM_INTEGRATION':
-        # For mechanism questions, prioritize molecular interactions
-        PRIORITY_RELATIONS['drug']['drug_protein'] = 1.8
-        PRIORITY_RELATIONS['gene']['protein_protein'] = 1.6
-    elif question_type == 'SYMPTOM_PROGRESSION':
-        # For symptom progression, prioritize temporal and causal relationships
-        PRIORITY_RELATIONS['disease']['progression'] = 1.9
-        PRIORITY_RELATIONS['disease']['has_symptom'] = 1.9
-        PRIORITY_RELATIONS['symptom']['symptom_of'] = 2.0
+    # Keep track of all visited nodes
+    all_important_nodes = set(seed_nodes)
     
-    all_neighbors = set()
+    # Perform focused traversal from each seed node separately
+    for seed_idx, seed_node in enumerate(seed_nodes):
+        print(f"Traversing from seed {seed_idx+1}/{len(seed_nodes)}: {names[seed_node] if seed_node < len(names) else 'Unknown'}")
+        
+        # Track nodes for this seed
+        current_level = {seed_node}
+        visited_from_this_seed = {seed_node}
+        
+        # Traverse n hops from this seed
+        for hop in range(n_hops):
+            next_level = set()
+            
+            # Process each node in current level
+            for node in current_level:
+                if len(all_important_nodes) >= MAX_TOTAL_NODES:
+                    break
+                    
+                try:
+                    # Limit outgoing edges - take only the most relevant
+                    # Try to get successors - these are outgoing edges
+                    successors = graph.successors(node).tolist()
+                    # Shuffle to avoid bias
+                    random.shuffle(successors)
+                    
+                    # Only take a limited number of neighbors
+                    neighbor_limit = max(3, max_neighbors // (hop+1))  # Reduce limit with distance
+                    for i, neighbor in enumerate(successors):
+                        if i >= neighbor_limit:  # Hard limit per node
+                            break
+                            
+                        if neighbor not in visited_from_this_seed:
+                            next_level.add(neighbor)
+                            visited_from_this_seed.add(neighbor)
+                            all_important_nodes.add(neighbor)
+                            
+                    # Get incoming edges, but with lower priority
+                    predecessors = graph.predecessors(node).tolist()
+                    random.shuffle(predecessors)
+                    for i, neighbor in enumerate(predecessors):
+                        if i >= neighbor_limit // 2:  # Even stricter limit for incoming edges
+                            break
+                            
+                        if neighbor not in visited_from_this_seed:
+                            next_level.add(neighbor)
+                            visited_from_this_seed.add(neighbor)
+                            all_important_nodes.add(neighbor)
+                            
+                except Exception as e:
+                    print(f"Error traversing from node {node}: {e}")
+                    continue
+            
+            # Move to next level
+            current_level = next_level
+            print(f"  Hop {hop+1} from seed {seed_idx+1}: Added {len(next_level)} nodes, total {len(visited_from_this_seed)}")
+            
+            # Stop if we've reached our limit or no more nodes to explore
+            if len(all_important_nodes) >= MAX_TOTAL_NODES or not next_level:
+                break
+        
+        # Check if we've hit the overall limit
+        if len(all_important_nodes) >= MAX_TOTAL_NODES:
+            print(f"Reached node limit of {MAX_TOTAL_NODES}, stopping traversal")
+            break
+    
+    # Collect edges between important nodes
     edge_info = {}
     
-    # For each starting node, traverse the graph using DGL's efficient neighbor sampling
-    for node_idx, node_name, _ in start_nodes:
-        # Get node category
-        node_category = categories[node_idx].split('/')[0] if '/' in categories[node_idx] else categories[node_idx]
-        node_category_lower = node_category.lower()
+    # Extract the names for the top seed nodes for better context
+    top_seed_names = {node_idx: names[node_idx] for node_idx in seed_nodes if node_idx < len(names)}
+    
+    # Use the graph to find connections between our important nodes
+    for node_idx in all_important_nodes:
         
-        # Get priority relationships for this node type
-        priority_rels = PRIORITY_RELATIONS.get(node_category_lower, {})
-        
-        # Collect relations using DGL's efficient neighbor sampling
-        collected_relations = {node_idx: []}
-        
-        # Get outgoing edges
-        out_edges = graph.out_edges(node_idx)
-        if isinstance(out_edges, tuple) and len(out_edges) == 2:
-            src_nodes, dst_nodes = out_edges
+        try:
+            # Skip if node is out of range
+            if node_idx >= len(names):
+                continue
+                
+            # Skip processing if we've already done this node
+            if node_idx in edge_info:
+                continue
+                
+            node_name = names[node_idx]
+            edge_info[node_idx] = []
             
-            # Process all destination nodes and score them
-            relation_scores = []
-            for i in range(len(dst_nodes)):
-                try:
-                    dst = dst_nodes[i].item() if hasattr(dst_nodes[i], 'item') else int(dst_nodes[i])
-                    # Find the relation type
-                    edge_id = graph.edge_ids(node_idx, dst)
-                    
-                    # Get relation type from edge data
-                    if hasattr(edge_id, 'numel') and edge_id.numel() > 0:
-                        rel_type = graph.edata['relation_type'][edge_id].item() if hasattr(edge_id, 'item') else str(edge_id)
-                        
-                        # Calculate priority score based on relation type
-                        rel_type_str = str(rel_type)
-                        # Check if this is a priority relation for this node type
-                        score = 0.5  # Base score for all relations
-                        
-                        # Boost score if it's a priority relation
-                        for priority_key, weight in priority_rels.items():
-                            if priority_key in rel_type_str.lower():
-                                score = weight
-                                break
-                        
-                        # Add target node category bonus
-                        dst_category = categories[dst].split('/')[0].lower() if '/' in categories[dst] else categories[dst].lower()
-                        # Boost specific category connections
-                        if dst_category in ['disease', 'symptom', 'drug', 'clinical_finding']:
-                            score += 0.3
-                        
-                        relation_scores.append((rel_type, dst, '->', score))
-                except Exception as e:
-                    continue
+            # Track neighbors we find
+            node_neighbors = []
             
-            # Sort by score and take top max_neighbors/2
-            relation_scores.sort(key=lambda x: x[3], reverse=True)
-            top_relations = relation_scores[:max_neighbors // 2]
-            
-            # Add top relations to collected_relations
-            for rel_type, dst, direction, _ in top_relations:
-                collected_relations[node_idx].append((rel_type, dst, direction))
-                all_neighbors.add(dst)
-        
-        # Get incoming edges
-        in_edges = graph.in_edges(node_idx)
-        if isinstance(in_edges, tuple) and len(in_edges) == 2:
-            src_nodes, dst_nodes = in_edges
-            
-            # Process all source nodes and score them
-            relation_scores = []
-            for i in range(len(src_nodes)):
-                try:
-                    src = src_nodes[i].item() if hasattr(src_nodes[i], 'item') else int(src_nodes[i])
-                    # Find the relation type
-                    edge_id = graph.edge_ids(src, node_idx)
-                    
-                    # Get relation type from edge data
-                    if hasattr(edge_id, 'numel') and edge_id.numel() > 0:
-                        rel_type = graph.edata['relation_type'][edge_id].item() if hasattr(edge_id, 'item') else str(edge_id)
+            # Get outgoing edges (node_idx -> other)
+            try:
+                successors = graph.successors(node_idx).tolist()
+                for dst in successors[:max_neighbors]:
+                    if dst >= len(names):
+                        continue
                         
-                        # Calculate priority score based on relation type
-                        rel_type_str = str(rel_type)
-                        # Check if this is a priority relation for this node type
-                        score = 0.5  # Base score for all relations
+                    # Get the relationship type
+                    try:
+                        edge_id = graph.edge_ids(node_idx, dst)
+                        if hasattr(edge_id, 'numel') and edge_id.numel() > 0:
+                            rel_type = graph.edata['relation_type'][edge_id].item() if hasattr(edge_id, 'item') else edge_id
+                            rel_type_str = str(rel_type)
+                            
+                            # Add this relationship
+                            if dst in all_important_nodes:
+                                edge_info[node_idx].append((rel_type_str, dst, '→'))
+                                node_neighbors.append(dst)
+                    except Exception as e:
+                        print(f"Error getting edge type: {e}")
+            except Exception as e:
+                print(f"Error getting successors for node {node_idx}: {e}")
+                
+            # Get incoming edges (other -> node_idx)
+            try:
+                predecessors = graph.predecessors(node_idx).tolist()
+                for src in predecessors[:max_neighbors]:
+                    if src >= len(names):
+                        continue
                         
-                        # Boost score if it's a priority relation
-                        for priority_key, weight in priority_rels.items():
-                            if priority_key in rel_type_str.lower():
-                                score = weight
-                                break
-                        
-                        # Add source node category bonus
-                        src_category = categories[src].split('/')[0].lower() if '/' in categories[src] else categories[src].lower()
-                        # Boost specific category connections
-                        if src_category in ['disease', 'symptom', 'drug', 'clinical_finding']:
-                            score += 0.3
-                        
-                        relation_scores.append((rel_type, src, '<-', score))
-                except Exception as e:
-                    continue
-            
-            # Sort by score and take top max_neighbors/2
-            relation_scores.sort(key=lambda x: x[3], reverse=True)
-            top_relations = relation_scores[:max_neighbors // 2]
-            
-            # Add top relations to collected_relations
-            for rel_type, src, direction, _ in top_relations:
-                collected_relations[node_idx].append((rel_type, src, direction))
-                all_neighbors.add(src)
-        
-        edge_info.update(collected_relations)
+                    # Get the relationship type
+                    try:
+                        edge_id = graph.edge_ids(src, node_idx)
+                        if hasattr(edge_id, 'numel') and edge_id.numel() > 0:
+                            rel_type = graph.edata['relation_type'][edge_id].item() if hasattr(edge_id, 'item') else edge_id
+                            rel_type_str = str(rel_type)
+                            
+                            # Add this relationship
+                            if src in all_important_nodes:
+                                edge_info[node_idx].append((rel_type_str, src, '←'))
+                                node_neighbors.append(src)
+                    except Exception as e:
+                        print(f"Error getting edge type: {e}")
+            except Exception as e:
+                print(f"Error getting predecessors for node {node_idx}: {e}")
+        except Exception as e:
+            print(f"Error processing node {node_idx}: {e}")
     
     # Format the retrieved knowledge - group by category for better organization
     knowledge_context = ["KNOWLEDGE GRAPH INFORMATION:"]
     
-    # Add starting point entities
-    knowledge_context.append("\n* RELEVANT ENTITIES:")
-    for node_idx, node_name, match_type in start_nodes:
-        node_category = categories[node_idx]
-        node_desc = descriptions[node_idx]
-        knowledge_context.append(f"- {node_name} ({node_category}): {node_desc}")
+    # First highlight the seed nodes
+    knowledge_context.append("\nSEED ENTITIES:")
+    for node_idx in seed_nodes:
+        if node_idx < len(names) and node_idx < len(descriptions):
+            name = names[node_idx]
+            description = descriptions[node_idx]
+            knowledge_context.append(f"- {name}: {description}")
     
-    # Group related entities by category
-    entities_by_category = {}
-    for node in all_neighbors:
-        if node in [idx for idx, _, _ in start_nodes]:  # Skip query nodes
+    # Collect entities with their information
+    entity_info = []
+    for node in all_important_nodes:
+        if node in seed_nodes:  # Skip seed nodes as we already included them
             continue
-        cat = categories[node]
-        main_cat = cat.split('/')[0] if '/' in cat else cat
+            
+        if node >= len(names) or node >= len(categories) or node >= len(descriptions):
+            continue
+            
+        name = names[node]
+        category = categories[node] if node < len(categories) else ""
+        description = descriptions[node] if node < len(descriptions) else ""
+        
+        if not name or not isinstance(name, str):
+            continue
+            
+        # Skip overly generic terms
+        if name.lower() in ["disease", "disorder", "syndrome", "drug", "medication"]:
+            continue
+            
+        entity_info.append((node, name, category, description))
+    
+    # Group entities by category
+    entities_by_category = {}
+    for node, name, category, description in entity_info:
+        # Get the main category
+        if not category or not isinstance(category, str):
+            continue
+            
+        # Handle common variations of categories
+        main_cat = category.lower()
+        
+        # Standardize categories to a smaller set
+        if 'disease' in main_cat or 'disorder' in main_cat or 'condition' in main_cat:
+            main_cat = 'Disease'
+        elif 'medication' in main_cat or 'drug' in main_cat or 'compound' in main_cat:
+            main_cat = 'Drug'
+        elif 'gene' in main_cat or 'protein' in main_cat or 'enzyme' in main_cat:
+            main_cat = 'Gene/Protein'
+        elif 'symptom' in main_cat or 'finding' in main_cat or 'sign' in main_cat:
+            main_cat = 'Symptom/Finding'
+        else:
+            main_cat = 'Other'  # Group less common categories
+            
         if main_cat not in entities_by_category:
             entities_by_category[main_cat] = []
-        entities_by_category[main_cat].append(node)
+        entities_by_category[main_cat].append((node, name, description))
     
     # Only include the most relevant categories, with type-specific filtering
     for category, nodes in entities_by_category.items():
-        category_lower = category.lower()
-        
-        # Skip certain categories based on question type
-        if question_type == 'RISK_ASSESSMENT' and category_lower in ['gene', 'protein', 'molecular_function']:
-            continue  # Skip molecular details for risk assessment questions
-        
-        if len(nodes) > 0:  # Only include non-empty categories
+        if nodes:  # Only add if we have entities
+            # Add category header
             knowledge_context.append(f"\n{category.upper()} ENTITIES:")
             
-            # Adjust number of entities based on question type and category
-            limit = 2 if question_type == 'RISK_ASSESSMENT' else 3
-            # For risk questions, show more risk factors and complications
-            if question_type == 'RISK_ASSESSMENT' and category_lower in ['risk_factor', 'complication', 'finding']:
-                limit = 4
+            # Apply category-specific limits
+            limit = 3  # Default limit
+            # Give more space to key medical categories
+            if category in ['Disease', 'Drug', 'Symptom/Finding']:
+                limit = 5
                 
-            for node in nodes[:limit]:  # Apply the appropriate limit
-                node_name = names[node]
-                node_desc = descriptions[node]
-                knowledge_context.append(f"- {node_name}: {node_desc}")
+            for node, name, description in nodes[:limit]:  # Apply the appropriate limit
+                knowledge_context.append(f"- {name}: {description}")
     
     # Add relationships - but be more selective
     knowledge_context.append("\n* KEY RELATIONSHIPS:")
-    for node_idx, node_name, _ in start_nodes:
-        if node_idx in edge_info:
+    for node_idx in seed_nodes:
+        if node_idx in edge_info and node_idx < len(names):
+            node_name = names[node_idx]
             knowledge_context.append(f"\nRelationships for {node_name}:")
             # Only take top 5 relationships to reduce noise
-            for rel, target_idx, direction in edge_info[node_idx][:5]:
-                target_name = names[target_idx]
-                # Format relation for better readability
-                formatted_rel = rel.replace('_', ' ').capitalize()
-                if direction == '->':
-                    knowledge_context.append(f"- {node_name} {formatted_rel} {target_name}")
-                else:
-                    knowledge_context.append(f"- {target_name} {formatted_rel} {node_name}")
+            for rel_type, other_node, direction in edge_info[node_idx][:5]:
+                other_name = names[other_node] if other_node < len(names) else "Unknown"
+                if direction == '→':
+                    knowledge_context.append(f"- {node_name} --[{rel_type}]--> {other_name}")
+                else:  # direction == '←'
+                    knowledge_context.append(f"- {other_name} --[{rel_type}]--> {node_name}")
     
     return "\n".join(knowledge_context)
 
@@ -917,79 +1039,61 @@ def evaluate_mcq(mcq, patient_data, primekg_dataset, model, use_rag=False, max_r
     # Get additional context from knowledge graph if using RAG
     kg_context = ""
     if use_rag and primekg_dataset:
-        # Extract key medical terms from the question and options
-        medical_terms = []
+        # Use medspacy to extract medical entities from the question and options
+        all_text = question + "\n" + "\n".join(options)
+        question_entities = extract_medical_entities(all_text)
         
-        # Extract medical terms using improved approach
-        
-        # 1. Add terms from question - extract medical entities
-        # Look for capitalized terms and multi-word phrases
-        question_words = question.split()
-        i = 0
-        while i < len(question_words):
-            word = question_words[i].strip('.,?!()[]{}"\'\'\"\')')
+        # Also extract entities from patient information
+        patient_text = ""
+        if "age" in patient_data:
+            patient_text += f"Patient age: {patient_data['age']}. "
+        if "gender" in patient_data:
+            patient_text += f"Gender: {patient_data['gender']}. "
+        if "conditions" in patient_data and isinstance(patient_data['conditions'], list):
+            patient_text += "Conditions: " + ", ".join(patient_data['conditions'][:5]) + ". "
+        if "medications" in patient_data and isinstance(patient_data['medications'], list):
+            patient_text += "Medications: " + ", ".join(patient_data['medications'][:5]) + ". "
             
-            # Check if this is a potential medical term (capitalized or known prefix)
-            if len(word) > 3 and (word[0].isupper() or 
-                                 any(word.lower().startswith(prefix) for prefix in 
-                                     ['anti', 'hyper', 'hypo', 'cardio', 'neuro', 'gastro', 'hepat'])):
-                # Try to capture multi-word medical terms
-                term = word
-                j = i + 1
-                while j < len(question_words) and not question_words[j].endswith(('.', '?', '!')):
-                    if question_words[j][0].isupper() or question_words[j].lower() in ['syndrome', 'disease', 'disorder']:
-                        term += " " + question_words[j].strip('.,?!()[]{}"\'\'\"\')')
-                        j += 1
-                    else:
-                        break
-                        
-                medical_terms.append(term)
-                i = j
-            else:
-                i += 1
+        patient_entities = []
+        if patient_text:
+            patient_entities = extract_medical_entities(patient_text)
         
-        # 2. Add terms from options - similar approach
-        for option in options:
-            option_words = option.split()
-            i = 0
-            while i < len(option_words):
-                word = option_words[i].strip('.,?!()[]{}"\'\'\"\')')
-                if len(word) > 3 and (word[0].isupper() or 
-                                     any(word.lower().startswith(prefix) for prefix in 
-                                         ['anti', 'hyper', 'hypo', 'cardio', 'neuro', 'gastro', 'hepat'])):
-                    term = word
-                    j = i + 1
-                    while j < len(option_words) and not option_words[j].endswith(('.', '?', '!')):
-                        if option_words[j][0].isupper() or option_words[j].lower() in ['syndrome', 'disease', 'disorder']:
-                            term += " " + option_words[j].strip('.,?!()[]{}"\'\'\"\')')
-                            j += 1
-                        else:
-                            break
-                    
-                    medical_terms.append(term)
-                    i = j
-                else:
-                    i += 1
-        
-        # 3. Add terms from patient conditions and medications
+        # Collect all conditions and medications
         conditions = patient_data.get('conditions', [])
-        if isinstance(conditions, list) or isinstance(conditions, np.ndarray):
-            # For risk assessment, include more patient conditions
-            if question_type == 'RISK_ASSESSMENT':
-                medical_terms.extend(conditions[:8])  # Add more conditions for risk assessment
-            else:
-                medical_terms.extend(conditions[:5])  # Add top conditions for other question types
-        
         medications = patient_data.get('medications', [])
-        if isinstance(medications, list) or isinstance(medications, np.ndarray):
-            # For MECHANISM_INTEGRATION, include more medications
-            if question_type == 'MECHANISM_INTEGRATION':
-                medical_terms.extend(medications[:8])  # Add more medications for mechanism questions
-            else:
-                medical_terms.extend(medications[:5])  # Add top medications for other question types
         
-        # Remove duplicates and limit to top 10 terms to improve precision
-        medical_terms = list(set(medical_terms))[:10]
+        # Combine all terms and deduplicate - ensure everything is a list
+        conditions_list = list(conditions[:5]) if isinstance(conditions, (list, np.ndarray)) else []
+        medications_list = list(medications[:5]) if isinstance(medications, (list, np.ndarray)) else []
+        
+        # Extract base medication names
+        base_medication_names = []
+        for med in medications_list:
+            base_name = extract_base_medication_name(med)
+            if base_name and len(base_name) > 3:
+                base_medication_names.append(base_name)
+                
+        # Add both full medication strings and extracted base names
+        all_medical_terms = question_entities + patient_entities + conditions_list + medications_list + base_medication_names
+        
+        # Deduplicate terms (case-insensitive) while preserving original case
+        term_map = {}
+        for term in all_medical_terms:
+            term_lower = term.lower()
+            # Keep the longer version if we have duplicates with different casing
+            if term_lower not in term_map or len(term) > len(term_map[term_lower]):
+                term_map[term_lower] = term
+                
+        # Create the final deduplicated list
+        medical_terms = list(term_map.values())
+        
+        print(f"Found {len(medical_terms)} unique medical entities")
+        
+        # This section is now handled above in the deduplication logic
+        # No need to add conditions/medications again since we already included them
+        
+        # We already deduplicated above, just limit to top 15 terms to improve precision
+        medical_terms = medical_terms[:15]
         
         # Get knowledge graph context with question type
         kg_context = get_graph_traversal_context(medical_terms, primekg_dataset, question_type=question_type)
