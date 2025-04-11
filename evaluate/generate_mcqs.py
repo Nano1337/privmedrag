@@ -29,7 +29,7 @@ def main():
     parser.add_argument(
         "--output_file",
         type=str,
-        default="./output/medical_mcqs.json",
+        default="./data/medical_mcqs.json",
         help="Path to save the generated MCQs"
     )
     parser.add_argument(

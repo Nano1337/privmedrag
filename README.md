@@ -15,7 +15,6 @@ uv sync
 ```
 
 ### FAQ
-TODO (haoli): try installing from scratch again to check reproducibility
 - You might run into `dgl` dependency install issues and will have to install from source. Note that installation currently only supported on ubuntu, not on Apple Silicon nor Windows.
 ```bash 
 git clone --recursive https://github.com/dmlc/dgl.git

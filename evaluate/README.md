@@ -32,7 +32,9 @@ The framework generates five types of knowledge-enhanced questions:
 ### 1. Generate MCQs (Optional, in HF Datasets already)
 
 ```bash
-python generate_mcqs.py --input_file ../dataset/synthea-info.json --output_file ./output/medical_mcqs.json --num_questions 400 --primekg_path ../dataset/primekg/ --questions_per_type 3 --checkpoint_file ./output/mcq_checkpoint.json --resume --seed 42
+cd evaluate
+
+python generate_mcqs.py --input_file ../dataset/synthea-info.json --output_file ./data/medical_mcqs.json --num_questions 400 --primekg_path ../dataset/primekg/ --questions_per_type 3 --checkpoint_file ./output/mcq_checkpoint.json --resume --seed 42
 
 python convert_to_parquet.py
 python upload_to_hf.py

@@ -1,9 +1,8 @@
-import os
 from datasets import Dataset
-from huggingface_hub import login, HfApi
+from huggingface_hub import login
 
 # Path to the Parquet file
-parquet_file_path = "/home/ubuntu/haoli/privmedrag/evaluate/output/medical_mcqs.parquet"
+parquet_file_path = "./data/medical_mcqs.parquet"
 
 # Load the dataset from the Parquet file
 dataset = Dataset.from_parquet(parquet_file_path, columns=['question', 'options', 'correct_index', 'patient_id', 'question_type'])

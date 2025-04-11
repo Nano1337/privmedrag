@@ -3,10 +3,10 @@ import json
 import os
 
 # Path to the JSON file
-json_file_path = "/home/ubuntu/haoli/privmedrag/evaluate/output/medical_mcqs.json"
+json_file_path = "./data/medical_mcqs.json"
 
 # Path for the output Parquet file
-parquet_file_path = "/home/ubuntu/haoli/privmedrag/evaluate/output/medical_mcqs.parquet"
+parquet_file_path = "./data/medical_mcqs.parquet"
 
 # Read the JSON file
 with open(json_file_path, 'r') as f:
