@@ -144,26 +144,8 @@ class PrimeKGDataset(DownloadableRGLDataset):
     
     def process(self):
         """Additional processing (optional)"""
-        # Store edge types
-        edges_path = os.path.join(self.raw_root_path, "PrimeKG", "relationships.csv")
-        if os.path.exists(edges_path):
-            edges_df = pd.read_csv(edges_path)
-            self.raw_edata = {
-                'relation_type': edges_df['relation_type'].values,
-                'source': edges_df['source'].values,
-                'pmids': edges_df['pmids'].fillna('').values
-            }
-        
-        # Try to load precomputed embeddings if available
-        self._load_precomputed_embeddings()
+        raise NotImplementedError("The process method is not implemented yet")
     
     def _load_precomputed_embeddings(self):
         """Load precomputed embeddings if available"""
-        embedding_path = os.path.join(self.processed_root_path, "biobert_embeddings.npy")
-        if os.path.exists(embedding_path):
-            embeddings = np.load(embedding_path)
-            self.feat = torch.FloatTensor(embeddings)
-            self.graph.ndata['feat'] = self.feat
-            print(f"Loaded precomputed embeddings of shape {self.feat.shape}")
-            return True
-        return False
+        raise NotImplementedError("The _load_precomputed_embeddings method is not implemented yet")
