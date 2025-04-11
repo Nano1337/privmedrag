@@ -38,11 +38,24 @@ python convert_to_parquet.py
 python upload_to_hf.py
 ```
 
-### 2. Evaluate Model Performance (TODO)
+### 2. Evaluate Model Performance
 
 ```bash
-python evaluate/evaluate_mcq_performance.py --model gemini --gemini_model gemini-2.0-flash --output_file ./evaluate/output/evaluation_results_test.json --seed 09052023 --num_questions 400
+python evaluate/evaluate_mcq_performance.py --model gemini --gemini_model gemini-2.0-flash --output_file ./evaluate/output/evaluation_results_test.json --seed 09052023 --num_questions 400 --privacy_level 0
 ```
+
+### 3. Evaluate Model Performance with different privacy levels
+
+To modify privacy level, add the `--privacy_level` argument to the command with choices of: 
+- 0: No anonymization
+- 1: Remove PII
+- 2: k-anonymity and l-diversity
+
+```bash
+python evaluate/evaluate_mcq_performance.py --model gemini --gemini_model gemini-2.0-flash --output_file ./evaluate/output/evaluation_results_test.json --seed 09052023 --num_questions 400 --privacy_level 1
+```
+
+
 
 ## Implementation Details
 

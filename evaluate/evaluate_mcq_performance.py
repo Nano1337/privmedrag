@@ -19,7 +19,7 @@ from dotenv import load_dotenv
 from typing import Dict, List, Any, Tuple, Set, Optional
 from difflib import get_close_matches
 import medspacy
-import spacy
+from data_utils import anonymize_data
 
 # Import OpenAI for LLM calls
 import openai
@@ -40,13 +40,14 @@ except ImportError:
 load_dotenv()
 
 
-def load_patient_data(patient_id: str, synthea_path: str) -> Dict:
+def load_patient_data(patient_id: str, synthea_path: str, privacy_level: int = 0) -> Dict:
     """
     Load patient data from Synthea parquet file for a specific patient ID
     
     Args:
         patient_id: The patient ID to retrieve data for
         synthea_path: Path to the Synthea parquet file
+        privacy_level: Privacy level for anonymization (0: No anonymization, 1: Remove PII, 2: k-anonymity and l-diversity)
         
     Returns:
         Dictionary containing patient data or empty dict if not found
@@ -55,7 +56,8 @@ def load_patient_data(patient_id: str, synthea_path: str) -> Dict:
         # Load the entire dataframe - in production, you'd want to optimize this
         # to only load the specific patient data needed
         df = pd.read_parquet(synthea_path)
-        
+        df = anonymize_data(df, level=privacy_level)
+
         # Filter for the specific patient
         patient_df = df[df['patient_id'] == patient_id]
         
@@ -214,6 +216,12 @@ def main():
         action='store_true',
         help="Use Gemini API instead of OpenAI"
     )
+    parser.add_argument(
+        "--privacy_level",
+        type=int,
+        default=0,
+        help="Privacy level for anonymization (0: No anonymization, 1: Remove PII, 2: k-anonymity and l-diversity)"
+    )
     args = parser.parse_args()
     
     # Set random seed for reproducibility
@@ -278,8 +286,8 @@ def main():
         
         # Load patient data for this MCQ
         patient_id = mcq['patient_id']
-        print(f"Loading patient data for ID: {patient_id}")
-        patient_data = load_patient_data(patient_id, args.synthea_path)
+        print(f"Loading patient data for ID: {patient_id} with privacy level {args.privacy_level}")
+        patient_data = load_patient_data(patient_id, args.synthea_path, privacy_level=args.privacy_level)
         
         # Evaluate without RAG
         print("Evaluating without RAG...")
@@ -801,9 +809,6 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
     
     # Collect edges between important nodes
     edge_info = {}
-    
-    # Extract the names for the top seed nodes for better context
-    top_seed_names = {node_idx: names[node_idx] for node_idx in seed_nodes if node_idx < len(names)}
     
     # Use the graph to find connections between our important nodes
     for node_idx in all_important_nodes:
