@@ -8,7 +8,17 @@ Note that currently PrivMedRAG only supports ubuntu.
 
 ## Setup
 
-We manage dependencies using `uv` so please install it first then run the following command to install all dependencies.
+### Prerequisites
+
+1. Clone the repository
+```bash
+git clone --recursive https://github.com/Nano1337/privmedrag.git
+cd privmedrag
+```
+
+2. We manage dependencies using `uv` so please install it first using the docs [here](https://docs.astral.sh/uv/getting-started/installation/) if you don't already have it.
+
+3. Then run the following command to install all dependencies.
 
 ```bash
 uv sync
