@@ -4,7 +4,7 @@ Authors: Haoli Yin and Tuktu Doga Nazli
 
 PrivMedRAG is a retrieval-augmented generation (RAG) system for privacy-preserving medical question generation and evaluation.
 
-Note that currently PrivMedRAG only supports ubuntu.
+**NOTE**: PrivMedRAG currently only supports Ubuntu.
 
 ## Setup
 
