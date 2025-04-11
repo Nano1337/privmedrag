@@ -467,7 +467,7 @@ def main():
     
     return 0
 
-def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_neighbors=20, n_hops=1):
+def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_neighbors=15, n_hops=1, question_type=None):
     """
     Retrieve relevant medical knowledge from PrimeKG by traversing the graph
     starting from entities that match the query terms
@@ -608,8 +608,13 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
                                      1 if x[2] == 'word_overlap' else 
                                      2 if x[2] == 'substring' else 3))
     
-    # Take top 3 matches as starting points
-    start_nodes = matched_nodes[:3]
+    # Adjust number of starting points based on question type
+    if question_type == 'RISK_ASSESSMENT':
+        # For risk assessment, we want more focused starting points
+        start_nodes = matched_nodes[:1] if matched_nodes else []
+    else:
+        # For other types, use 2 starting points
+        start_nodes = matched_nodes[:2] if matched_nodes else []
     
     # Define important medical relationship types to prioritize with weights
     PRIORITY_RELATIONS = {
@@ -641,6 +646,27 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
             'protein_protein': 0.8
         }
     }
+    
+    # Adjust priorities based on question type
+    if question_type == 'RISK_ASSESSMENT':
+        # For risk assessment, prioritize statistical and predictive relationships
+        PRIORITY_RELATIONS['disease']['risk_factor'] = 2.0
+        PRIORITY_RELATIONS['disease']['associated_with'] = 1.9
+        PRIORITY_RELATIONS['disease']['complication'] = 1.9
+        PRIORITY_RELATIONS['disease']['predisposes'] = 2.0
+        PRIORITY_RELATIONS['disease']['probability'] = 2.0
+        # Deprioritize treatment-related info for risk questions
+        PRIORITY_RELATIONS['drug']['treats'] = 0.8
+        PRIORITY_RELATIONS['drug']['indication'] = 0.7
+    elif question_type == 'MECHANISM_INTEGRATION':
+        # For mechanism questions, prioritize molecular interactions
+        PRIORITY_RELATIONS['drug']['drug_protein'] = 1.8
+        PRIORITY_RELATIONS['gene']['protein_protein'] = 1.6
+    elif question_type == 'SYMPTOM_PROGRESSION':
+        # For symptom progression, prioritize temporal and causal relationships
+        PRIORITY_RELATIONS['disease']['progression'] = 1.9
+        PRIORITY_RELATIONS['disease']['has_symptom'] = 1.9
+        PRIORITY_RELATIONS['symptom']['symptom_of'] = 2.0
     
     all_neighbors = set()
     edge_info = {}
@@ -774,22 +800,35 @@ def get_graph_traversal_context(query_terms: List[str], primekg_dataset, max_nei
             entities_by_category[main_cat] = []
         entities_by_category[main_cat].append(node)
     
-    # Only include the most clinically relevant entity categories
-    relevant_categories = ['disease', 'symptom', 'drug', 'clinical_finding', 'procedure']
+    # Only include the most relevant categories, with type-specific filtering
     for category, nodes in entities_by_category.items():
-        if category.lower() in relevant_categories:
+        category_lower = category.lower()
+        
+        # Skip certain categories based on question type
+        if question_type == 'RISK_ASSESSMENT' and category_lower in ['gene', 'protein', 'molecular_function']:
+            continue  # Skip molecular details for risk assessment questions
+        
+        if len(nodes) > 0:  # Only include non-empty categories
             knowledge_context.append(f"\n{category.upper()} ENTITIES:")
-            for node in nodes[:5]:  # Limit to 5 entities per category
+            
+            # Adjust number of entities based on question type and category
+            limit = 2 if question_type == 'RISK_ASSESSMENT' else 3
+            # For risk questions, show more risk factors and complications
+            if question_type == 'RISK_ASSESSMENT' and category_lower in ['risk_factor', 'complication', 'finding']:
+                limit = 4
+                
+            for node in nodes[:limit]:  # Apply the appropriate limit
                 node_name = names[node]
                 node_desc = descriptions[node]
                 knowledge_context.append(f"- {node_name}: {node_desc}")
     
-    # Add relationships
+    # Add relationships - but be more selective
     knowledge_context.append("\n* KEY RELATIONSHIPS:")
     for node_idx, node_name, _ in start_nodes:
         if node_idx in edge_info:
             knowledge_context.append(f"\nRelationships for {node_name}:")
-            for rel, target_idx, direction in edge_info[node_idx][:10]:  # Limit to 10 relationships
+            # Only take top 5 relationships to reduce noise
+            for rel, target_idx, direction in edge_info[node_idx][:5]:
                 target_name = names[target_idx]
                 # Format relation for better readability
                 formatted_rel = rel.replace('_', ' ').capitalize()
@@ -935,27 +974,57 @@ def evaluate_mcq(mcq, patient_data, primekg_dataset, model, use_rag=False, max_r
         # 3. Add terms from patient conditions and medications
         conditions = patient_data.get('conditions', [])
         if isinstance(conditions, list) or isinstance(conditions, np.ndarray):
-            medical_terms.extend(conditions[:5])  # Add top conditions
+            # For risk assessment, include more patient conditions
+            if question_type == 'RISK_ASSESSMENT':
+                medical_terms.extend(conditions[:8])  # Add more conditions for risk assessment
+            else:
+                medical_terms.extend(conditions[:5])  # Add top conditions for other question types
         
         medications = patient_data.get('medications', [])
         if isinstance(medications, list) or isinstance(medications, np.ndarray):
-            medical_terms.extend(medications[:5])  # Add top medications
+            # For MECHANISM_INTEGRATION, include more medications
+            if question_type == 'MECHANISM_INTEGRATION':
+                medical_terms.extend(medications[:8])  # Add more medications for mechanism questions
+            else:
+                medical_terms.extend(medications[:5])  # Add top medications for other question types
         
-        # Remove duplicates and limit to top 15 terms
-        medical_terms = list(set(medical_terms))[:15]
+        # Remove duplicates and limit to top 10 terms to improve precision
+        medical_terms = list(set(medical_terms))[:10]
         
-        # Get knowledge graph context
-        kg_context = get_graph_traversal_context(medical_terms, primekg_dataset)
+        # Get knowledge graph context with question type
+        kg_context = get_graph_traversal_context(medical_terms, primekg_dataset, question_type=question_type)
     
-    # Format the prompt for the LLM - keeping it simple and focused
-    prompt = f"""You are a medical expert taking a multiple-choice medical exam. Answer the following question based on your medical knowledge.
+    # Format the prompt for the LLM - adjusted by question type
+    base_prompt = "You are a medical expert taking a multiple-choice medical exam. "
+    
+    # Add type-specific instructions
+    if question_type == 'RISK_ASSESSMENT':
+        prompt = f"""{base_prompt}Focus on statistical patterns, patient risk factors, and evidence-based guidelines for risk prediction.
+
+{patient_context}
+"""
+    elif question_type == 'MECHANISM_INTEGRATION':
+        prompt = f"""{base_prompt}Focus on biological mechanisms, physiological processes, and drug interactions.
+
+{patient_context}
+"""
+    elif question_type == 'CLINICAL_INTERPRETATION':
+        prompt = f"""{base_prompt}Focus on interpreting clinical findings, lab results, and diagnostic reasoning.
+
+{patient_context}
+"""
+    else:  # Default prompt for other question types
+        prompt = f"""{base_prompt}Answer the following question based on your medical knowledge.
 
 {patient_context}
 """
     
     # Add knowledge graph context if using RAG
     if use_rag and kg_context:
-        prompt += f"\n{kg_context}\n"
+        if question_type == 'RISK_ASSESSMENT':
+            prompt += f"\nRELEVANT RISK FACTORS AND EVIDENCE:\n{kg_context}\n"
+        else:
+            prompt += f"\n{kg_context}\n"
     
     # Add the question and options
     prompt += f"\nQUESTION: {question}\n\nOPTIONS:\n"
