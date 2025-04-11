@@ -32,14 +32,14 @@ class PrimeKGDataset(DownloadableRGLDataset):
     def download_graph(self, dataset_name, graph_root_path):
         """Load PrimeKG into a DGL graph"""
         # Define paths to PrimeKG data files
-        nodes_path = os.path.join(self.raw_root_path, "nodes.csv")
+        nodes_path = os.path.join(self.raw_root_path, "nodes.tsv")
         edges_path = os.path.join(self.raw_root_path, "edges.csv")
         
         print(f"Loading nodes from {nodes_path}")
         print(f"Loading edges from {edges_path}")
         
         # Load node data
-        nodes_df = pd.read_csv(nodes_path)
+        nodes_df = pd.read_csv(nodes_path, delimiter='\t')
         
         # From the data inspection, we know the columns are:
         # node_index, node_id, node_type, node_name, node_source
@@ -144,8 +144,8 @@ class PrimeKGDataset(DownloadableRGLDataset):
     
     def process(self):
         """Additional processing (optional)"""
-        raise NotImplementedError("The process method is not implemented yet")
+        pass
     
     def _load_precomputed_embeddings(self):
         """Load precomputed embeddings if available"""
-        raise NotImplementedError("The _load_precomputed_embeddings method is not implemented yet")
+        pass

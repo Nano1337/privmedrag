@@ -166,13 +166,13 @@ def main():
     parser.add_argument(
         "--synthea_path",
         type=str,
-        default="/home/ubuntu/haoli/privmedrag/dataset/synthea-unified.parquet",
+        default="./dataset/synthea-unified.parquet",
         help="Path to the Synthea unified parquet file"
     )
     parser.add_argument(
         "--primekg_path",
         type=str,
-        default="/home/ubuntu/haoli/privmedrag/dataset/primekg",
+        default="./dataset/primekg",
         help="Path to the PrimeKG dataset directory"
     )
     parser.add_argument(
