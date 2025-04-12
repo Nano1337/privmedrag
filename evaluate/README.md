@@ -29,7 +29,9 @@ The framework generates five types of knowledge-enhanced questions:
 
 ## Usage
 
-### 1. Generate MCQs (Optional, in HF Datasets already)
+### 0. Generate MCQs (Optional, in HF Datasets already)
+
+In order to generate MCQs, you will need to put an `OPENAI_API_KEY` in the `.env` file (create it using `touch .env` if it doesn't exist).
 
 ```bash
 cd evaluate
@@ -40,13 +42,20 @@ python convert_to_parquet.py
 python upload_to_hf.py
 ```
 
-### 2. Evaluate Model Performance
+### 1. Evaluate Model Performance
 
+You have to create a `GEMINI_API_KEY` in the `.env` file (create it using `touch .env` if it doesn't exist). Please get the API key from aistudio.google.com.
+
+Run this from the root of the repo: 
 ```bash
 python evaluate/evaluate_mcq_performance.py --model gemini --gemini_model gemini-2.0-flash --output_file ./evaluate/output/level0_evals.json --seed 09052023 --num_questions 400 --privacy_level 0
 ```
 
-### 3. Evaluate Model Performance with different privacy levels
+FAQ: 
+- If you get a numpy dtype error, please run `uv pip install numpy==1.26.4 pyyaml` and try again.
+- If you get an `google-generativeai` error, double check that your GEMINI_API_KEY is correct and set in the `.env` file.
+
+### 2. Evaluate Model Performance with different privacy levels
 
 To modify privacy level, add the `--privacy_level` argument to the command with choices of: 
 - 0: No anonymization
@@ -56,6 +65,11 @@ To modify privacy level, add the `--privacy_level` argument to the command with 
 ```bash
 python evaluate/evaluate_mcq_performance.py --model gemini --gemini_model gemini-2.0-flash --output_file ./evaluate/output/level1_evals.json --seed 09052023 --num_questions 400 --privacy_level 1
 ```
+
+FAQ: 
+- If you get an `google-generativeai` error: 
+    - double check that your GEMINI_API_KEY is correct and set in the `.env` file.
+    - Install: `uv pip install google-genai`
 
 ## Implementation Details
 
